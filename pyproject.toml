@@ -6,5 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "drjit>=1.2.0",
+    "graphviz>=0.21",
     "numpy>=2.4.2",
 ]

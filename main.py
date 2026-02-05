@@ -1,23 +1,66 @@
 import drjit as dr
-import numpy as np
-from drjit.auto.ad import TensorXf, Texture3f, Array3f, Array1f, Float, Bool
+from drjit.auto.ad import TensorXf, Texture3f, Array3f, Float, Bool
+
+
+def z_propagate(
+    R: Array3f,
+    T: Array3f,
+    z: float,
+) -> Array3f:
+    """
+    Propagates the ray through the z-plane.
+    """
+    if z > 0:
+        dt = (z - R[0]) / T[0]
+        return R + dt * T
+    else:
+        return R
+
+
+def loss_func(
+    R_pred: Array3f,
+    T_pred: Array3f,
+    R_target: Array3f,
+    T_target: Array3f,
+    z_planes: tuple[float, ...],
+) -> Float:
+
+    loss = dr.zeros(Float)
+
+    for z in z_planes:
+        R_pred_z = z_propagate(R_pred, T_pred, z)
+        R_target_z = z_propagate(R_target, T_target, z)
+        loss += dr.mean(dr.sqrt(dr.sum(dr.square(R_pred_z[1:] - R_target_z[1:]))))
+    
+    loss /= len(z_planes)
+    return loss
+
+
+def gradient(n_sq_tensor: TensorXf) -> Texture3f:
+    # Central difference (f[i+1] - f[i-1]) / 2.0
+    # This matches the precision requirements of the Runge-Kutta steps
+    grad_z = (n_sq_tensor[2:, 1:-1, 1:-1] - n_sq_tensor[:-2, 1:-1, 1:-1])
+    grad_y = (n_sq_tensor[1:-1, 2:, 1:-1] - n_sq_tensor[1:-1, :-2, 1:-1])
+    grad_x = (n_sq_tensor[1:-1, 1:-1, 2:] - n_sq_tensor[1:-1, 1:-1, :-2])
+    grad = 0.5 * dr.concat([grad_z, grad_y, grad_x], axis=-1)
+    return Texture3f(grad)
 
 
 def trace_rays_sharma(
     R_start: Array3f,
     T_start: Array3f,
     delta_t: float,
-    index_sq_texture: Texture3f,
+    grad_tex: Texture3f,
     cube_min: Array3f,
     cube_max: Array3f,
 ) -> tuple[Array3f, Array3f]:
     """
-    Implements the Sharma et al. numerical ray tracing method[cite: 1, 13].
+    Implements the Sharma et al. numerical ray tracing method.
     
-    R_start: Array3f - Batch of initial ray positions[cite: 70].
-    T_start: Array3f - Batch of initial optical ray vectors (n * dr/ds)[cite: 40, 70].
-    delta_t: float   - The extrapolation distance (integration step)[cite: 77].
-    index_sq_texture: Texture3f - 3D texture containing n^2 values[cite: 38, 50].
+    R_start: Array3f - Batch of initial ray positions.
+    T_start: Array3f - Batch of initial optical ray vectors (n * dr/ds).
+    delta_t: float   - The extrapolation distance (integration step).
+    grad_tex: Texture3f - 3D texture containing n^2 values.
     cube_min/max: Array3f - Physical boundaries of the cubic medium.
     """
     
@@ -33,24 +76,11 @@ def trace_rays_sharma(
         """
         # 1. Map physical position to [0, 1] for texture sampling
         uvw = (pos - cube_min) / (cube_max - cube_min)
-        
-        # 2. Enable gradient tracking on the input position
-        dr.enable_grad(uvw)
-        
-        # 3. Sample n^2 (refractive index squared) from texture [cite: 38]
-        # Hardware interpolation provides a continuous field for the gradient
-        n_sq = Array1f(index_sq_texture.eval(uvw))
-        
-        # 4. Backpropagate to find grad(n^2) [cite: 34]
-        dr.backward(n_sq)
-        grad_n_sq = dr.grad(uvw)
-        
-        # 5. Return D = 0.5 * grad(n^2) 
-        return 0.5 * grad_n_sq
+        return Array3f(grad_tex.eval(uvw))
 
-    # Runge-Kutta Integration Loop [cite: 14, 71]
+    # Runge-Kutta Integration Loop
     # This loop marches the rays until they exit the cube bounds
-    max_steps = 100
+    max_steps = 1
     step = 0
     while step < max_steps:
         step += 1
@@ -59,21 +89,22 @@ def trace_rays_sharma(
         # if not active:
         #     break
 
-        # Matrix A = delta_t * D(R_n) [cite: 74]
+        # Matrix A = delta_t * D(R_n)
         A = delta_t * get_D(R)
         
-        # Matrix B = delta_t * D(R_n + 0.5*delta_t*T_n + 0.125*delta_t*A) [cite: 75]
+        # Matrix B = delta_t * D(R_n + 0.5*delta_t*T_n + 0.125*delta_t*A)
         R_b = R + 0.5 * delta_t * T + 0.125 * delta_t * A
         B = delta_t * get_D(R_b)
         
-        # Matrix C = delta_t * D(R_n + delta_t*T_n + 0.5*delta_t*B) [cite: 75]
+        # Matrix C = delta_t * D(R_n + delta_t*T_n + 0.5*delta_t*B)
         R_c = R + delta_t * T + 0.5 * delta_t * B
         C = delta_t * get_D(R_c)
         
-        # Update Position R_{n+1} [cite: 72]
+        # Update Position R_{n+1}
+        # R = R + delta_t * (T + (1.0/6.0) * (A + 2.0 * B))
         R[active] += delta_t * (T + (1.0/6.0) * (A + 2.0 * B))
-        
-        # Update Optical Ray Vector T_{n+1} [cite: 72]
+         
+        # Update Optical Ray Vector T_{n+1}
         T[active] += (1.0/6.0) * (A + 4.0 * B + C)
         
         # Termination: Ray exits the cubic medium
@@ -86,18 +117,17 @@ def trace_rays_sharma(
 def main():
     # --- Example Usage ---
     # Setup dummy texture data (e.g., a simple radial gradient)
-    # n^2 = 2.5 - 0.1 * (x^2 + y^2) [cite: 87]
+    # n^2 = 2.5 - 0.1 * (x^2 + y^2)
     res = 512
     grid = dr.meshgrid(
         dr.linspace(Float, 0, 2, res), 
         dr.linspace(Float, -1, 1, res), 
         dr.linspace(Float, -1, 1, res)
     )
-    n_sq_data = 2.5 - 0.1 * (dr.square(grid[1]) + dr.square(grid[2]))
-    n_sq_data = dr.reshape(TensorXf, n_sq_data, (res, res, res, 1))
-
-    tex = Texture3f(n_sq_data)
-    dr.enable_grad(tex)
+    n_data = 2.5 - 0.1 * (dr.square(grid[1]) + dr.square(grid[2]))
+    n_data = dr.reshape(TensorXf, n_data, (res, res, res, 1))
+    # n_data = Texture3f(n_data)
+    dr.enable_grad(n_data)
 
     # Define Batch
     num_rays = 1024
@@ -108,11 +138,29 @@ def main():
     )
     T0 = Array3f(1.0, 0.0, 0.0) # n * direction 
 
-    # Trace
-    final_R, final_T = trace_rays_sharma(
-        R0, T0, 0.1, tex, Array3f(0, -1, -1), Array3f(2, 1, 1)
-    )
-    print(final_R.shape, final_T.shape)
+    n_epochs = 100
+    lr = 0.01
+
+    R, T = R0, T0
+
+    for _ in range(n_epochs):
+        # Trace
+        n_grad = gradient(n_data)
+
+        R, T = trace_rays_sharma(
+            R, T, 0.1, n_grad, Array3f(0, -1, -1), Array3f(2, 1, 1)
+        )
+
+        loss = loss_func(R, T, R0, T0, (0.0, 1.0))
+        print(f"loss: {loss.item()}")
+
+        # Backpropagate
+        dr.set_grad(n_data, 0.0)
+        dr.backward(loss)
+
+        # Update
+        n_data = n_data - lr * dr.grad(n_data)
+        dr.eval(n_data, R, T)  # reset variable tracing
 
 
 if __name__ == "__main__":
