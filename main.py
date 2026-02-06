@@ -80,14 +80,10 @@ def trace_rays_sharma(
 
     # Runge-Kutta Integration Loop
     # This loop marches the rays until they exit the cube bounds
-    max_steps = 1
+    max_steps = 1_000
     step = 0
-    while step < max_steps:
+    while step < max_steps and dr.any(active):
         step += 1
-
-        # TODO: enable later
-        # if not active:
-        #     break
 
         # Matrix A = delta_t * D(R_n)
         A = delta_t * get_D(R)
@@ -101,15 +97,14 @@ def trace_rays_sharma(
         C = delta_t * get_D(R_c)
         
         # Update Position R_{n+1}
-        # R = R + delta_t * (T + (1.0/6.0) * (A + 2.0 * B))
         R[active] += delta_t * (T + (1.0/6.0) * (A + 2.0 * B))
-         
+          
         # Update Optical Ray Vector T_{n+1}
         T[active] += (1.0/6.0) * (A + 4.0 * B + C)
-        
+         
         # Termination: Ray exits the cubic medium
         within_bounds = dr.all((R >= cube_min) & (R <= cube_max))
-        active &= within_bounds
+        active = active & within_bounds
 
     return R, T
 
@@ -143,6 +138,10 @@ def main():
 
     R, T = R0, T0
 
+    # import napari
+    # viewer = napari.Viewer()
+    # viewer.add_image(n_data.numpy().squeeze(), name="n_data")
+
     for _ in range(n_epochs):
         # Trace
         n_grad = gradient(n_data)
@@ -161,6 +160,9 @@ def main():
         # Update
         n_data = n_data - lr * dr.grad(n_data)
         dr.eval(n_data, R, T)  # reset variable tracing
+    
+    # viewer.add_image(n_data.numpy().squeeze(), name="n_data_updated")
+    # napari.run()
 
 
 if __name__ == "__main__":
