@@ -233,9 +233,7 @@ def main():
     imwrite("image_target.png", image_target)
 
     n_epochs = 100
-    lr = 10
-
-    R, T = R0, T0
+    lr = 1
 
     # import napari
     # viewer = napari.Viewer()
@@ -251,6 +249,11 @@ def main():
     plt.close()
 
     for _ in range(n_epochs):
+
+        R_target, T_target = trace_rays_sharma(
+            R0, T0, 0.01, ref_n_data, dr_cube_min, dr_cube_max
+        )
+
         # Trace
         R, T = trace_rays_sharma(
             R0, T0, 0.01, n_data, dr_cube_min, dr_cube_max
