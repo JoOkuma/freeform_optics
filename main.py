@@ -33,17 +33,17 @@ def z_propagate(
 
 
 def loss_func(
-    R_pred: Array3f,
-    T_pred: Array3f,
-    R_target: Array3f,
-    T_target: Array3f,
+    zyx_pred: Array3f,
+    v_zyx_pred: Array3f,
+    zyx_target: Array3f,
+    v_zyx_target: Array3f,
     z_planes: tuple[float, ...],
 ) -> Float:
     loss = dr.zeros(Float)
     for z in z_planes:
-        R_pred_z = z_propagate(R_pred, T_pred, z)
-        R_target_z = z_propagate(R_target, T_target, z)
-        loss += dr.mean(dr.norm(R_pred_z[1:] - R_target_z[1:]))
+        pred_propagated = z_propagate(zyx_pred, v_zyx_pred, z)
+        target_propagated = z_propagate(zyx_target, v_zyx_target, z)
+        loss += dr.mean(dr.norm(pred_propagated[1:] - target_propagated[1:]))
     loss /= len(z_planes)
     return loss
 
@@ -60,8 +60,8 @@ def gradient(n_sq_tensor: TensorXf) -> Texture3f:
 
 
 def trace_rays_sharma(
-    R_start: Array3f,
-    T_start: Array3f,
+    zyx_start: Array3f,
+    v_zyx_start: Array3f,
     dt: float,
     n_data: TensorXf,
     cube_min: Array3f,
@@ -70,8 +70,8 @@ def trace_rays_sharma(
     """
     Implements the Sharma et al. numerical ray tracing method.
 
-    R_start: Array3f - Batch of initial ray positions.
-    T_start: Array3f - Batch of initial optical ray vectors (n * dr/ds).
+    zyx_start: Array3f - Batch of initial ray positions.
+    v_zyx_start: Array3f - Batch of initial optical ray vectors (n * dr/ds).
     delta_t: float   - The extrapolation distance (integration step).
     n_data: TensorXf - 3D texture containing n^2 values.
     cube_min/max: Array3f - Physical boundaries of the cubic medium.
@@ -91,40 +91,40 @@ def trace_rays_sharma(
 
     def _loop_body(
         active: Bool,
-        R: Array3f,
-        T: Array3f,
+        zyx: Array3f,
+        v_zyx: Array3f,
     ) -> tuple[Array3f, Array3f, Bool]:
         # Matrix A = delta_t * D(R_n)
-        A = dt * get_D(R, active)
+        A = dt * get_D(zyx, active)
 
         # Matrix B = delta_t * D(R_n + 0.5*delta_t*T_n + 0.125*delta_t*A)
-        R_b = R + 0.5 * dt * T + 0.125 * dt * A
-        B = dt * get_D(R_b, active)
+        B_zyx = zyx + 0.5 * dt * v_zyx + 0.125 * dt * A
+        B = dt * get_D(B_zyx, active)
 
         # Matrix C = delta_t * D(R_n + delta_t*T_n + 0.5*delta_t*B)
-        R_c = R + dt * T + 0.5 * dt * B
-        C = dt * get_D(R_c, active)
+        C_zyx = zyx + dt * v_zyx + 0.5 * dt * B
+        C = dt * get_D(C_zyx, active)
 
         # Update Position R_{n+1}
-        R += dr.select(active, dt * (T + (1.0 / 6.0) * (A + 2.0 * B)), 0.0)
+        zyx += dr.select(active, dt * (v_zyx + (1.0 / 6.0) * (A + 2.0 * B)), 0.0)
 
         # Update Optical Ray Vector T_{n+1}
-        T += dr.select(active, (1.0 / 6.0) * (A + 4.0 * B + C), 0.0)
+        v_zyx += dr.select(active, (1.0 / 6.0) * (A + 4.0 * B + C), 0.0)
 
-        within_bounds = dr.all(R >= cube_min) & dr.all(R <= cube_max)
+        within_bounds = dr.all(zyx >= cube_min) & dr.all(zyx <= cube_max)
         active = active & within_bounds
 
-        return active, R, T
+        return active, zyx, v_zyx
 
     state = (
         Bool(True),  # active
-        Array3f(R_start),  # R
-        Array3f(T_start),  # T
+        Array3f(zyx_start),  # R
+        Array3f(v_zyx_start),  # T
     )
 
     _, final_R, final_T = dr.while_loop(
         state,
-        lambda active, R, T: active,
+        lambda active, zyx, v_zyx: active,
         _loop_body,
         label="trace_rays_sharma",
         max_iterations=-1,
@@ -134,14 +134,14 @@ def trace_rays_sharma(
 
 
 def render_rays(
-    R: Array3f,
+    zyx: Array3f,
     cube_min: Array3f,
     cube_max: Array3f,
     shape: tuple[int, int],
 ) -> TensorXi:
     assert len(shape) == 2
 
-    R_norm = (R - cube_min) / (cube_max - cube_min)
+    R_norm = (zyx - cube_min) / (cube_max - cube_min)
 
     uv = Array2i(dr.round(shape * R_norm[1:] + 0.5))
 
@@ -172,10 +172,7 @@ def maxwell_fisheye(
     return n_map
 
 
-def main():
-    # --- Example Usage ---
-    # Setup dummy texture data (e.g., a simple radial gradient)
-    # n^2 = 2.5 - 0.1 * (x^2 + y^2)
+def main() -> None:
     res = 512
     rng = np.random.RandomState(42)
     cube_min = (0, -1, -1)
@@ -195,15 +192,15 @@ def main():
 
     # Define Batch
     n_rays = 512 * 512
-    # R0, T0 = uniform_rays(cube_min, cube_max, n_rays)
-    # R0, T0 = random_canonical_rays(np.pi/4, n_rays, rng)
-    R0 = random_points_in_a_circle(n_rays, 1.0, rng)
-    T0 = random_directions_in_a_cone(n_rays, np.pi / 4, rng)
-    # R0 += (1.0, 0.0, 0.0)
+    # zyx_0, v_zyx_0 = uniform_rays(cube_min, cube_max, n_rays)
+    # zyx_0, v_zyx_0 = random_canonical_rays(np.pi/4, n_rays, rng)
+    zyx_0 = random_points_in_a_circle(n_rays, 1.0, rng)
+    v_zyx_0 = random_directions_in_a_cone(n_rays, np.pi / 4, rng)
+    # zyx_0 += (1.0, 0.0, 0.0)
 
-    R_target, T_target = trace_rays_sharma(R0, T0, 0.001, ref_n_data, dr_cube_min, dr_cube_max)
+    zyx_target, zyx_target = trace_rays_sharma(zyx_0, v_zyx_0, 0.001, ref_n_data, dr_cube_min, dr_cube_max)
 
-    image_target = render_rays(R_target, dr_cube_min, dr_cube_max, (512, 512))
+    image_target = render_rays(zyx_target, dr_cube_min, dr_cube_max, (512, 512))
     # print(dr.whos_ad())
     image_target = image_target.numpy()
     print(image_target.shape, image_target.dtype)
@@ -230,15 +227,15 @@ def main():
     n_rays = 1024
 
     for _ in range(n_epochs):
-        R0 = random_points_in_a_circle(n_rays, 0.5, rng)
-        T0 = random_directions_in_a_cone(n_rays, np.pi / 4, rng)
+        zyx_0 = random_points_in_a_circle(n_rays, 0.5, rng)
+        v_zyx_0 = random_directions_in_a_cone(n_rays, np.pi / 4, rng)
 
-        R_target, T_target = trace_rays_sharma(R0, T0, 1 / res, ref_n_data, dr_cube_min, dr_cube_max)
+        zyx_target, zyx_target = trace_rays_sharma(zyx_0, v_zyx_0, 1 / res, ref_n_data, dr_cube_min, dr_cube_max)
 
         # Trace
-        R, T = trace_rays_sharma(R0, T0, 1 / res, n_data, dr_cube_min, dr_cube_max)
+        zyx, v_zyx = trace_rays_sharma(zyx_0, v_zyx_0, 1 / res, n_data, dr_cube_min, dr_cube_max)
 
-        loss = loss_func(R, T, R_target, T_target, (0.0, 0.05))
+        loss = loss_func(zyx, v_zyx, zyx_target, zyx_target, (0.0, 0.05))
         print(f"loss: {loss.item()}")
         if loss.item() < 1e-6:
             print("loss is too small, stopping")

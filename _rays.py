@@ -40,15 +40,15 @@ def uniform_rays(
     num_rays: int,
 ) -> tuple[Array3f, Array3f]:
     n_rays_per_axis = int(math.sqrt(num_rays))
-    R0 = Array3f(
+    zyx = Array3f(
         0.0,
         *dr.meshgrid(
             dr.linspace(Float, cube_min[1], cube_max[1], n_rays_per_axis),
             dr.linspace(Float, cube_min[2], cube_max[2], n_rays_per_axis),
         ),
     )
-    T0 = Array3f(1.0, 0.0, 0.0)  # n * direction
-    return R0, T0
+    v_zyx = Array3f(1.0, 0.0, 0.0)  # n * direction
+    return zyx, v_zyx
 
 
 def random_canonical_rays(
