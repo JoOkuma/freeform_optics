@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import drjit as dr
 from drjit.auto.ad import TensorXf, Texture3f, Array3f, Float, Bool, Array2i, Int, TensorXi
+from _rays import random_canonical_rays, uniform_rays, random_points_in_a_circle, random_directions_in_a_cone
 
 
 def z_propagate(
@@ -159,46 +160,12 @@ def maxwell_fisheye(
     return n_map
 
 
-def uniform_rays(
-    cube_min: tuple[float, float, float],
-    cube_max: tuple[float, float, float],
-    num_rays: int,
-) -> tuple[Array3f, Array3f]:
-    n_rays_per_axis = int(math.sqrt(num_rays))
-    R0 = Array3f(
-        0.0,
-        *dr.meshgrid(
-            dr.linspace(Float, cube_min[1], cube_max[1], n_rays_per_axis),
-            dr.linspace(Float, cube_min[2], cube_max[2], n_rays_per_axis),
-        )
-    )
-    T0 = Array3f(1.0, 0.0, 0.0) # n * direction 
-    return R0, T0
-
-
-def random_canonical_rays(
-    cone_angle: float,
-    num_rays: int,
-) -> tuple[Array3f, Array3f]:
-    # Point-picking on a sphere is easy, but also easy to do wrong:
-    theta = np.arccos(np.random.uniform(np.cos(cone_angle/2), 1, num_rays))
-    phi   =           np.random.uniform(0,              2*np.pi, num_rays)
-    # Calculate our trig functions:
-    sin_th, cos_th = np.sin(theta), np.cos(theta)
-    sin_ph, cos_ph = np.sin(phi),   np.cos(phi)
-
-    # Convert back to Cartesian:
-    T0 = Array3f(np.stack([cos_th, sin_th * sin_ph, sin_th * cos_ph], axis=0))
-    R0 = dr.zeros(Array3f, (3, num_rays))
-
-    return R0, T0
-
-
 def main():
     # --- Example Usage ---
     # Setup dummy texture data (e.g., a simple radial gradient)
     # n^2 = 2.5 - 0.1 * (x^2 + y^2)
     res = 512
+    rng = np.random.RandomState(42)
     cube_min = (0, -1, -1)
     cube_max = (2, 1, 1)
     dr_cube_min = Array3f(cube_min)
@@ -217,7 +184,9 @@ def main():
     # Define Batch
     n_rays = 512 * 512
     # R0, T0 = uniform_rays(cube_min, cube_max, n_rays)
-    R0, T0 = random_canonical_rays(np.pi/4, n_rays)
+    # R0, T0 = random_canonical_rays(np.pi/4, n_rays, rng)
+    R0 = random_points_in_a_circle(n_rays, 1.0, rng)
+    T0 = random_directions_in_a_cone(n_rays, np.pi/4, rng)
     # R0 += (1.0, 0.0, 0.0)
 
     R_target, T_target = trace_rays_sharma(
@@ -233,13 +202,12 @@ def main():
     imwrite("image_target.png", image_target)
 
     n_epochs = 100
-    lr = 1
+    lr = 100
 
     # import napari
     # viewer = napari.Viewer()
     # viewer.add_image(n_data.numpy().squeeze(), name="n_data")
-
-    n_data = dr.full(TensorXf, 1.0, (res, res, res, 1))
+    n_data = dr.full(TensorXf, 1.5, (res, res, res, 1))
     dr.enable_grad(n_data)
     print(n_data.shape)
 
@@ -250,17 +218,23 @@ def main():
 
     for _ in range(n_epochs):
 
+        R0 = random_points_in_a_circle(n_rays, 0.25, rng)
+        T0 = random_directions_in_a_cone(n_rays, np.pi/4, rng)
+
         R_target, T_target = trace_rays_sharma(
-            R0, T0, 0.01, ref_n_data, dr_cube_min, dr_cube_max
+            R0, T0, 1 / res, ref_n_data, dr_cube_min, dr_cube_max
         )
 
         # Trace
         R, T = trace_rays_sharma(
-            R0, T0, 0.01, n_data, dr_cube_min, dr_cube_max
+            R0, T0, 1 / res, n_data, dr_cube_min, dr_cube_max
         )
 
-        loss = loss_func(R, T, R_target, T_target, (0.0, 1.0))
+        loss = loss_func(R, T, R_target, T_target, (0.0, 0.01))
         print(f"loss: {loss.item()}")
+        if loss.item() < 1e-6:
+            print("loss is too small, stopping")
+            break
 
         # Backpropagate
         dr.set_grad(n_data, 0.0)
