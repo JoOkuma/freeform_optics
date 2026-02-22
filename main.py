@@ -27,14 +27,11 @@ def loss_func(
     T_target: Array3f,
     z_planes: tuple[float, ...],
 ) -> Float:
-
     loss = dr.zeros(Float)
-
     for z in z_planes:
         R_pred_z = z_propagate(R_pred, T_pred, z)
         R_target_z = z_propagate(R_target, T_target, z)
         loss += dr.mean(dr.norm(R_pred_z[1:] - R_target_z[1:]))
-    
     loss /= len(z_planes)
     return loss
 
@@ -216,7 +213,6 @@ def main():
     ref_n_data = maxwell_fisheye(2.0, grid)
     ref_n_data = dr.reshape(TensorXf, ref_n_data, (res, res, res, 1))
     # ref_n_data = dr.full(TensorXf, 1.0, (res, res, res, 1))
-    dr.enable_grad(ref_n_data)
 
     # Define Batch
     n_rays = 512 * 512
@@ -224,7 +220,7 @@ def main():
     R0, T0 = random_canonical_rays(np.pi/4, n_rays)
     # R0 += (1.0, 0.0, 0.0)
 
-    R_target, _ = trace_rays_sharma(
+    R_target, T_target = trace_rays_sharma(
         R0, T0, 0.001, ref_n_data, dr_cube_min, dr_cube_max
     )
 
@@ -235,10 +231,9 @@ def main():
     image_target = (image_target * 255).astype("uint8")
     from imageio import imwrite
     imwrite("image_target.png", image_target)
-    return
 
     n_epochs = 100
-    lr = 0.01
+    lr = 10
 
     R, T = R0, T0
 
@@ -246,22 +241,38 @@ def main():
     # viewer = napari.Viewer()
     # viewer.add_image(n_data.numpy().squeeze(), name="n_data")
 
+    n_data = dr.full(TensorXf, 1.0, (res, res, res, 1))
+    dr.enable_grad(n_data)
+    print(n_data.shape)
+
+    plt.imshow(n_data.numpy().squeeze()[:, res//2])
+    plt.colorbar()
+    plt.savefig("n_data.png")
+    plt.close()
+
     for _ in range(n_epochs):
         # Trace
         R, T = trace_rays_sharma(
-            R, T, 0.1, n_data, Array3f(0, -1, -1), Array3f(2, 1, 1)
+            R0, T0, 0.01, n_data, dr_cube_min, dr_cube_max
         )
 
-        loss = loss_func(R, T, R0, T0, (0.0, 1.0))
+        loss = loss_func(R, T, R_target, T_target, (0.0, 1.0))
         print(f"loss: {loss.item()}")
 
         # Backpropagate
         dr.set_grad(n_data, 0.0)
         dr.backward(loss)
 
+        plt.imshow(n_data.numpy().squeeze()[:, res//2])
+        plt.colorbar()
+        plt.savefig("n_data.png")
+        plt.close()
+
         # Update
-        n_data = n_data - lr * dr.grad(n_data)
-        dr.eval(n_data, R, T)  # reset variable tracing
+        n_data_grad = dr.grad(n_data)
+        with dr.suspend_grad(n_data):
+            n_data = n_data - lr * n_data_grad
+        dr.enable_grad(n_data)
     
     # viewer.add_image(n_data.numpy().squeeze(), name="n_data_updated")
     # napari.run()
