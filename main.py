@@ -1,3 +1,5 @@
+import math
+import numpy as np
 import matplotlib.pyplot as plt
 import drjit as dr
 from drjit.auto.ad import TensorXf, Texture3f, Array3f, Float, Bool, Array2i, Int, TensorXi
@@ -43,6 +45,7 @@ def gradient(n_sq_tensor: TensorXf) -> Texture3f:
     grad_z = (n_sq_tensor[2:, 1:-1, 1:-1] - n_sq_tensor[:-2, 1:-1, 1:-1])
     grad_y = (n_sq_tensor[1:-1, 2:, 1:-1] - n_sq_tensor[1:-1, :-2, 1:-1])
     grad_x = (n_sq_tensor[1:-1, 1:-1, 2:] - n_sq_tensor[1:-1, 1:-1, :-2])
+    plt.savefig("grad_z.png")
     grad = 0.5 * dr.concat([grad_z, grad_y, grad_x], axis=-1)
     return Texture3f(grad)
 
@@ -50,7 +53,7 @@ def gradient(n_sq_tensor: TensorXf) -> Texture3f:
 def trace_rays_sharma(
     R_start: Array3f,
     T_start: Array3f,
-    delta_t: float,
+    dt: float,
     n_data: TensorXf,
     cube_min: Array3f,
     cube_max: Array3f,
@@ -68,32 +71,32 @@ def trace_rays_sharma(
     # Initialize state from starting conditions
     n_grad = gradient(n_data)
  
-    def get_D(pos: Array3f) -> Array3f:
+    def get_D(pos: Array3f, active: Bool) -> Array3f:
         """
         Computes D = 1/2 * grad(n^2).
         Uses autodiff to compute the spatial gradient through the texture.
         """
         # 1. Map physical position to [0, 1] for texture sampling
         uvw = (pos - cube_min) / (cube_max - cube_min)
-        return Array3f(n_grad.eval(uvw))
+        return Array3f(n_grad.eval(uvw, active))
     
     def _loop_body(
         active: Bool, R: Array3f, T: Array3f,
     ) -> tuple[Array3f, Array3f, Bool]:
 
         # Matrix A = delta_t * D(R_n)
-        A = delta_t * get_D(R)
+        A = dt * get_D(R, active)
         
         # Matrix B = delta_t * D(R_n + 0.5*delta_t*T_n + 0.125*delta_t*A)
-        R_b = R + 0.5 * delta_t * T + 0.125 * delta_t * A
-        B = delta_t * get_D(R_b)
+        R_b = R + 0.5 * dt * T + 0.125 * dt * A
+        B = dt * get_D(R_b, active)
         
         # Matrix C = delta_t * D(R_n + delta_t*T_n + 0.5*delta_t*B)
-        R_c = R + delta_t * T + 0.5 * delta_t * B
-        C = delta_t * get_D(R_c)
+        R_c = R + dt * T + 0.5 * dt * B
+        C = dt * get_D(R_c, active)
         
         # Update Position R_{n+1}
-        R += dr.select(active, delta_t * (T + (1.0/6.0) * (A + 2.0 * B)), 0.0)
+        R += dr.select(active, dt * (T + (1.0/6.0) * (A + 2.0 * B)), 0.0)
           
         # Update Optical Ray Vector T_{n+1}
         T += dr.select(active, (1.0/6.0) * (A + 4.0 * B + C), 0.0)
@@ -130,7 +133,7 @@ def render_rays(
 
     R_norm = ((R - cube_min) / (cube_max - cube_min))
 
-    uv = Array2i(dr.round(shape * R_norm[1:]))
+    uv = Array2i(dr.round(shape * R_norm[1:] + 0.5))
 
     valid = R_norm[0] > 1.0  # reached the surface
     values = dr.select(valid, 1.0, 0.0)
@@ -153,10 +156,46 @@ def maxwell_fisheye(
     grid: tuple[TensorXf, TensorXf, TensorXf],
 ) -> TensorXf:
     # assuming z in (0, 2), x and y in (-1, 1)
-    r_squared = dr.square(grid[0] - 1.0) + dr.square(grid[1]) + dr.square(grid[2])
-    n_map = n0 / (1 + r_squared)
+    r_squared = dr.square(grid[0] - 1 + 1.0 / 512) + dr.square(grid[1]) + dr.square(grid[2])
+    R_sq = 0.5 ** 2
+    n_map = n0 / (1 + r_squared / R_sq)
     return n_map
-    
+
+
+def uniform_rays(
+    cube_min: tuple[float, float, float],
+    cube_max: tuple[float, float, float],
+    num_rays: int,
+) -> tuple[Array3f, Array3f]:
+    n_rays_per_axis = int(math.sqrt(num_rays))
+    R0 = Array3f(
+        0.0,
+        *dr.meshgrid(
+            dr.linspace(Float, cube_min[1], cube_max[1], n_rays_per_axis),
+            dr.linspace(Float, cube_min[2], cube_max[2], n_rays_per_axis),
+        )
+    )
+    T0 = Array3f(1.0, 0.0, 0.0) # n * direction 
+    return R0, T0
+
+
+def random_canonical_rays(
+    cone_angle: float,
+    num_rays: int,
+) -> tuple[Array3f, Array3f]:
+    # Point-picking on a sphere is easy, but also easy to do wrong:
+    theta = np.arccos(np.random.uniform(np.cos(cone_angle/2), 1, num_rays))
+    phi   =           np.random.uniform(0,              2*np.pi, num_rays)
+    # Calculate our trig functions:
+    sin_th, cos_th = np.sin(theta), np.cos(theta)
+    sin_ph, cos_ph = np.sin(phi),   np.cos(phi)
+
+    # Convert back to Cartesian:
+    T0 = Array3f(np.stack([cos_th, sin_th * sin_ph, sin_th * cos_ph], axis=0))
+    R0 = dr.zeros(Array3f, (3, num_rays))
+
+    return R0, T0
+
 
 def main():
     # --- Example Usage ---
@@ -174,24 +213,19 @@ def main():
         dr.linspace(Float, cube_min[2], cube_max[2], res)
     )
 
-    # n_data = maxwell_fisheye(2.0, grid)
-    # n_data = dr.reshape(TensorXf, n_data, (res, res, res, 1))
-    n_data = dr.full(TensorXf, 1.0, (res, res, res, 1))
-    dr.enable_grad(n_data)
+    ref_n_data = maxwell_fisheye(2.0, grid)
+    ref_n_data = dr.reshape(TensorXf, ref_n_data, (res, res, res, 1))
+    # ref_n_data = dr.full(TensorXf, 1.0, (res, res, res, 1))
+    dr.enable_grad(ref_n_data)
 
     # Define Batch
-    n_rays_per_axis = 512
-    R0 = Array3f(
-        0.0,
-        *dr.meshgrid(
-            dr.linspace(Float, cube_min[1], cube_max[1], n_rays_per_axis),
-            dr.linspace(Float, cube_min[2], cube_max[2], n_rays_per_axis),
-        )
-    )
-    T0 = Array3f(1.0, 0.0, 0.0) # n * direction 
+    n_rays = 512 * 512
+    # R0, T0 = uniform_rays(cube_min, cube_max, n_rays)
+    R0, T0 = random_canonical_rays(np.pi/4, n_rays)
+    # R0 += (1.0, 0.0, 0.0)
 
     R_target, _ = trace_rays_sharma(
-        R0, T0, 0.001, n_data, dr_cube_min, dr_cube_max
+        R0, T0, 0.001, ref_n_data, dr_cube_min, dr_cube_max
     )
 
     image_target = render_rays(R_target, dr_cube_min, dr_cube_max, (512, 512))
