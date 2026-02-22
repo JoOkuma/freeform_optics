@@ -216,9 +216,11 @@ def main():
     plt.savefig("n_data.png")
     plt.close()
 
+    n_rays = 1024
+
     for _ in range(n_epochs):
 
-        R0 = random_points_in_a_circle(n_rays, 0.25, rng)
+        R0 = random_points_in_a_circle(n_rays, 0.5, rng)
         T0 = random_directions_in_a_cone(n_rays, np.pi/4, rng)
 
         R_target, T_target = trace_rays_sharma(
@@ -230,7 +232,7 @@ def main():
             R0, T0, 1 / res, n_data, dr_cube_min, dr_cube_max
         )
 
-        loss = loss_func(R, T, R_target, T_target, (0.0, 0.01))
+        loss = loss_func(R, T, R_target, T_target, (0.0, 0.05))
         print(f"loss: {loss.item()}")
         if loss.item() < 1e-6:
             print("loss is too small, stopping")
