@@ -18,18 +18,19 @@ from _rays import (
 
 
 def z_propagate(
-    R: Array3f,
-    T: Array3f,
+    zyx: Array3f,
+    v_zyx: Array3f,
     z: float,
+    z_max: float,
 ) -> Array3f:
     """
     Propagates the ray through the z-plane.
     """
     if z > 0:
-        dt = (z - R[0]) / T[0]
-        return R + dt * T
+        dt = (z - (zyx[0] - z_max)) / v_zyx[0]
+        return zyx + dt * v_zyx
     else:
-        return R
+        return zyx
 
 
 def loss_func(
@@ -37,12 +38,13 @@ def loss_func(
     v_zyx_pred: Array3f,
     zyx_target: Array3f,
     v_zyx_target: Array3f,
+    cube_max: tuple[float, float, float],
     z_planes: tuple[float, ...],
 ) -> Float:
     loss = dr.zeros(Float)
     for z in z_planes:
-        pred_propagated = z_propagate(zyx_pred, v_zyx_pred, z)
-        target_propagated = z_propagate(zyx_target, v_zyx_target, z)
+        pred_propagated = z_propagate(zyx_pred, v_zyx_pred, z, cube_max[0])
+        target_propagated = z_propagate(zyx_target, v_zyx_target, z, cube_max[0])
         loss += dr.mean(dr.norm(pred_propagated[1:] - target_propagated[1:]))
     loss /= len(z_planes)
     return loss
@@ -235,7 +237,7 @@ def main() -> None:
         # Trace
         zyx, v_zyx = trace_rays_sharma(zyx_0, v_zyx_0, 1 / res, n_data, dr_cube_min, dr_cube_max)
 
-        loss = loss_func(zyx, v_zyx, zyx_target, zyx_target, (0.0, 0.05))
+        loss = loss_func(zyx, v_zyx, zyx_target, zyx_target, cube_max, (0.0, 0.05))
         print(f"loss: {loss.item()}")
         if loss.item() < 1e-6:
             print("loss is too small, stopping")
