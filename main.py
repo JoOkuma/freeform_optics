@@ -1,5 +1,6 @@
+import matplotlib.pyplot as plt
 import drjit as dr
-from drjit.auto.ad import TensorXf, Texture3f, Array3f, Float, Bool
+from drjit.auto.ad import TensorXf, Texture3f, Array3f, Float, Bool, Array2i, Int, TensorXi
 
 
 def z_propagate(
@@ -30,7 +31,7 @@ def loss_func(
     for z in z_planes:
         R_pred_z = z_propagate(R_pred, T_pred, z)
         R_target_z = z_propagate(R_target, T_target, z)
-        loss += dr.mean(dr.sqrt(dr.sum(dr.square(R_pred_z[1:] - R_target_z[1:]))))
+        loss += dr.mean(dr.norm(R_pred_z[1:] - R_target_z[1:]))
     
     loss /= len(z_planes)
     return loss
@@ -50,7 +51,7 @@ def trace_rays_sharma(
     R_start: Array3f,
     T_start: Array3f,
     delta_t: float,
-    grad_tex: Texture3f,
+    n_data: TensorXf,
     cube_min: Array3f,
     cube_max: Array3f,
 ) -> tuple[Array3f, Array3f]:
@@ -60,15 +61,13 @@ def trace_rays_sharma(
     R_start: Array3f - Batch of initial ray positions.
     T_start: Array3f - Batch of initial optical ray vectors (n * dr/ds).
     delta_t: float   - The extrapolation distance (integration step).
-    grad_tex: Texture3f - 3D texture containing n^2 values.
+    n_data: TensorXf - 3D texture containing n^2 values.
     cube_min/max: Array3f - Physical boundaries of the cubic medium.
     """
     
     # Initialize state from starting conditions
-    R = Array3f(R_start)
-    T = Array3f(T_start)
-    active = Bool(True)
-
+    n_grad = gradient(n_data)
+ 
     def get_D(pos: Array3f) -> Array3f:
         """
         Computes D = 1/2 * grad(n^2).
@@ -76,14 +75,11 @@ def trace_rays_sharma(
         """
         # 1. Map physical position to [0, 1] for texture sampling
         uvw = (pos - cube_min) / (cube_max - cube_min)
-        return Array3f(grad_tex.eval(uvw))
-
-    # Runge-Kutta Integration Loop
-    # This loop marches the rays until they exit the cube bounds
-    max_steps = 1_000
-    step = 0
-    while step < max_steps and dr.any(active):
-        step += 1
+        return Array3f(n_grad.eval(uvw))
+    
+    def _loop_body(
+        active: Bool, R: Array3f, T: Array3f,
+    ) -> tuple[Array3f, Array3f, Bool]:
 
         # Matrix A = delta_t * D(R_n)
         A = delta_t * get_D(R)
@@ -97,41 +93,115 @@ def trace_rays_sharma(
         C = delta_t * get_D(R_c)
         
         # Update Position R_{n+1}
-        R[active] += delta_t * (T + (1.0/6.0) * (A + 2.0 * B))
+        R += dr.select(active, delta_t * (T + (1.0/6.0) * (A + 2.0 * B)), 0.0)
           
         # Update Optical Ray Vector T_{n+1}
-        T[active] += (1.0/6.0) * (A + 4.0 * B + C)
-         
-        # Termination: Ray exits the cubic medium
-        within_bounds = dr.all((R >= cube_min) & (R <= cube_max))
+        T += dr.select(active, (1.0/6.0) * (A + 4.0 * B + C), 0.0)
+
+        within_bounds = dr.all(R >= cube_min) & dr.all(R <= cube_max)
         active = active & within_bounds
 
-    return R, T
+        return active, R, T
 
+    state = (
+        Bool(True),       # active
+        Array3f(R_start), # R
+        Array3f(T_start), # T
+    )
+
+    _, final_R, final_T = dr.while_loop(
+        state,
+        lambda active, R, T: active,
+        _loop_body,
+        label="trace_rays_sharma",
+        max_iterations=-1,
+    )
+
+    return final_R, final_T
+
+
+def render_rays(
+    R: Array3f,
+    cube_min: Array3f,
+    cube_max: Array3f,
+    shape: tuple[int, int],
+) -> TensorXi:
+    assert len(shape) == 2
+
+    R_norm = ((R - cube_min) / (cube_max - cube_min))
+
+    uv = Array2i(dr.round(shape * R_norm[1:]))
+
+    valid = R_norm[0] > 1.0  # reached the surface
+    values = dr.select(valid, 1.0, 0.0)
+
+    valid_np = valid.numpy()
+    uv_np = uv.numpy()
+    valid_uv_np = uv_np[:, valid_np]
+    plt.hist2d(valid_uv_np[0], valid_uv_np[1])
+    plt.savefig("hist.png")
+
+    image = dr.zeros(Float, shape[0] * shape[1])
+    dr.scatter_reduce(dr.ReduceOp.Add, image, values, uv[0] * shape[1] + uv[1])
+    image = image / dr.max(image)
+
+    return dr.reshape(TensorXf, image, (shape[0], shape[1]))
+
+
+def maxwell_fisheye(
+    n0: float,
+    grid: tuple[TensorXf, TensorXf, TensorXf],
+) -> TensorXf:
+    # assuming z in (0, 2), x and y in (-1, 1)
+    r_squared = dr.square(grid[0] - 1.0) + dr.square(grid[1]) + dr.square(grid[2])
+    n_map = n0 / (1 + r_squared)
+    return n_map
+    
 
 def main():
     # --- Example Usage ---
     # Setup dummy texture data (e.g., a simple radial gradient)
     # n^2 = 2.5 - 0.1 * (x^2 + y^2)
     res = 512
+    cube_min = (0, -1, -1)
+    cube_max = (2, 1, 1)
+    dr_cube_min = Array3f(cube_min)
+    dr_cube_max = Array3f(cube_max)
+
     grid = dr.meshgrid(
-        dr.linspace(Float, 0, 2, res), 
-        dr.linspace(Float, -1, 1, res), 
-        dr.linspace(Float, -1, 1, res)
+        dr.linspace(Float, cube_min[0], cube_max[0], res), 
+        dr.linspace(Float, cube_min[1], cube_max[1], res), 
+        dr.linspace(Float, cube_min[2], cube_max[2], res)
     )
-    n_data = 2.5 - 0.1 * (dr.square(grid[1]) + dr.square(grid[2]))
-    n_data = dr.reshape(TensorXf, n_data, (res, res, res, 1))
-    # n_data = Texture3f(n_data)
+
+    # n_data = maxwell_fisheye(2.0, grid)
+    # n_data = dr.reshape(TensorXf, n_data, (res, res, res, 1))
+    n_data = dr.full(TensorXf, 1.0, (res, res, res, 1))
     dr.enable_grad(n_data)
 
     # Define Batch
-    num_rays = 1024
+    n_rays_per_axis = 512
     R0 = Array3f(
         0.0,
-        dr.linspace(Float, -1, 1, num_rays),
-        dr.linspace(Float, -1, 1, num_rays),
+        *dr.meshgrid(
+            dr.linspace(Float, cube_min[1], cube_max[1], n_rays_per_axis),
+            dr.linspace(Float, cube_min[2], cube_max[2], n_rays_per_axis),
+        )
     )
     T0 = Array3f(1.0, 0.0, 0.0) # n * direction 
+
+    R_target, _ = trace_rays_sharma(
+        R0, T0, 0.001, n_data, dr_cube_min, dr_cube_max
+    )
+
+    image_target = render_rays(R_target, dr_cube_min, dr_cube_max, (512, 512))
+    # print(dr.whos_ad())
+    image_target = image_target.numpy()
+    print(image_target.shape, image_target.dtype)
+    image_target = (image_target * 255).astype("uint8")
+    from imageio import imwrite
+    imwrite("image_target.png", image_target)
+    return
 
     n_epochs = 100
     lr = 0.01
@@ -144,10 +214,8 @@ def main():
 
     for _ in range(n_epochs):
         # Trace
-        n_grad = gradient(n_data)
-
         R, T = trace_rays_sharma(
-            R, T, 0.1, n_grad, Array3f(0, -1, -1), Array3f(2, 1, 1)
+            R, T, 0.1, n_data, Array3f(0, -1, -1), Array3f(2, 1, 1)
         )
 
         loss = loss_func(R, T, R0, T0, (0.0, 1.0))
