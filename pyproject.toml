@@ -1,3 +1,10 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/freeform_optics"]
+
 [project]
 name = "freeform-optics"
 version = "0.1.0"
@@ -13,10 +20,21 @@ dependencies = [
     "numpy>=2.4.2",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 # https://docs.astral.sh/ruff
 [tool.ruff]
 target-version = "py310"
-src = ["."]
+src = ["src"]
 line-length = 120
 
 # https://docs.astral.sh/ruff/rules
@@ -44,5 +62,3 @@ select = [
 [tool.ruff.format]
 docstring-code-format = true
 skip-magic-trailing-comma = false # default is false
-
-
