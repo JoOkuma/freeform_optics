@@ -1,20 +1,9 @@
 import drjit as dr
 import matplotlib.pyplot as plt
 import numpy as np
-from drjit.auto.ad import (
-    Array2i,
-    Array3f,
-    Bool,
-    Float,
-    TensorXf,
-    TensorXi,
-    Texture3f,
-)
+from drjit.auto.ad import Array2i, Array3f, Bool, Float, TensorXf, TensorXi, Texture3f
 
-from _rays import (
-    random_directions_in_a_cone,
-    random_points_in_a_circle,
-)
+from _rays import random_directions_in_a_cone, random_points_in_a_circle
 
 
 def z_propagate(
@@ -200,7 +189,7 @@ def main() -> None:
     v_zyx_0 = random_directions_in_a_cone(n_rays, np.pi / 4, rng)
     # zyx_0 += (1.0, 0.0, 0.0)
 
-    zyx_target, zyx_target = trace_rays_sharma(zyx_0, v_zyx_0, 0.001, ref_n_data, dr_cube_min, dr_cube_max)
+    zyx_target, v_zyx_target = trace_rays_sharma(zyx_0, v_zyx_0, 0.001, ref_n_data, dr_cube_min, dr_cube_max)
 
     image_target = render_rays(zyx_target, dr_cube_min, dr_cube_max, (512, 512))
     # print(dr.whos_ad())
@@ -232,12 +221,12 @@ def main() -> None:
         zyx_0 = random_points_in_a_circle(n_rays, 0.5, rng)
         v_zyx_0 = random_directions_in_a_cone(n_rays, np.pi / 4, rng)
 
-        zyx_target, zyx_target = trace_rays_sharma(zyx_0, v_zyx_0, 1 / res, ref_n_data, dr_cube_min, dr_cube_max)
+        zyx_target, v_zyx_target = trace_rays_sharma(zyx_0, v_zyx_0, 1 / res, ref_n_data, dr_cube_min, dr_cube_max)
 
         # Trace
         zyx, v_zyx = trace_rays_sharma(zyx_0, v_zyx_0, 1 / res, n_data, dr_cube_min, dr_cube_max)
 
-        loss = loss_func(zyx, v_zyx, zyx_target, zyx_target, cube_max, (0.0, 0.05))
+        loss = loss_func(zyx, v_zyx, zyx_target, v_zyx_target, cube_max, (0.0, 0.05))
         print(f"loss: {loss.item()}")
         if loss.item() < 1e-6:
             print("loss is too small, stopping")
