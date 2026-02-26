@@ -11,12 +11,15 @@ from pathlib import Path
 
 import drjit as dr
 import numpy as np
+from rich import print
 
 from freeform_optics import (
     LoggingConfig,
     RefractiveOptic,
     RefractiveOpticConfig,
     TrainingLogger,
+    cosine_annealing_lr,
+    gaussian_filter,
     imaging_loss,
 )
 from freeform_optics.rays import random_directions_in_a_cone, random_points_in_a_circle
@@ -36,10 +39,13 @@ def main() -> None:
         dt=0.1,
     )
 
-    N_RAYS = 512
+    N_RAYS = 1024
     N_EPOCHS = 1000
-    LR = 10
+    LR_MAX = 10
+    LR_MIN = 1e-2
     Z_PLANES = (0.0, 1.0)
+    GRAD_SIGMA = 1.0
+    SAMPLING_RADIUS = 3.0
 
     rng = np.random.RandomState(42)
 
@@ -53,7 +59,7 @@ def main() -> None:
     for iteration in range(N_EPOCHS):
         # Sample random ray bundle
         zyx_0 = random_points_in_a_circle(
-            N_RAYS, radius=1.0, cube_min=CONFIG.cube_min, cube_max=CONFIG.cube_max, rng=rng
+            N_RAYS, radius=SAMPLING_RADIUS, cube_min=CONFIG.cube_min, cube_max=CONFIG.cube_max, rng=rng
         )
         v_zyx_0 = random_directions_in_a_cone(N_RAYS, cone_angle=np.pi / 6, rng=rng)
 
@@ -77,10 +83,12 @@ def main() -> None:
         loss_value = loss[0]
         grad = dr.grad(optic.volume)
         with dr.suspend_grad():
-            optic.volume = optic.volume - LR * grad
+            lr = cosine_annealing_lr(iteration, LR_MIN, LR_MAX, N_EPOCHS)
+            smooth_grad = gaussian_filter(grad, sigma=GRAD_SIGMA)
+            optic.volume = optic.volume - lr * smooth_grad
 
-        print(f"iteration {iteration:04d}  loss={loss_value:.4f} µm")
-        logger.on_iteration(iteration, optic, loss_value)
+        print(f"iteration {iteration:04d}  loss={loss_value:.4f} µm  lr={lr:.4f}")
+        logger.on_iteration(iteration, optic, {"loss": loss_value, "lr": lr})
 
 
 if __name__ == "__main__":

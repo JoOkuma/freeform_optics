@@ -15,13 +15,13 @@ class LoggingConfig:
     Parameters
     ----------
     output_dir : Path
-        Directory to write images and loss plots.
+        Directory to write images and metric plots.
     frequency : int
         Log every N iterations.
     overwrite : bool
         If True, overwrite the same file each time (useful for live monitoring).
         If False, append the iteration index to the filename so every snapshot
-        is preserved (e.g., concentration_000100.png).
+        is preserved (e.g., refractive_index_000100.png).
     """
 
     output_dir: Path
@@ -43,24 +43,25 @@ class TrainingLogger:
     --------
     >>> logger = TrainingLogger(LoggingConfig(output_dir=Path("output")))
     >>> for iteration in range(n_epochs):
+    ...     lr = cosine_annealing_lr(iteration, lr_max=10.0, n_steps=n_epochs)
     ...     optic, loss = train_step(optic, ...)
-    ...     logger.on_iteration(iteration, optic, loss)
+    ...     logger.on_iteration(iteration, optic, {"loss": loss, "lr": lr})
     """
 
     def __init__(self, config: LoggingConfig) -> None:
         self._config = config
-        self._loss_history: list[float] = []
+        self._history: dict[str, list[float]] = {}
         config.output_dir.mkdir(parents=True, exist_ok=True)
 
     def on_iteration(
         self,
         iteration: int,
         optic: RefractiveOptic,
-        loss: float,
+        metrics: dict[str, float],
     ) -> None:
         """Called each iteration by the training loop.
 
-        Saves a mid-plane concentration cross-section and a loss curve
+        Saves a mid-plane refractive index cross-section and a metrics plot
         according to the configured frequency and overwrite settings.
 
         Parameters
@@ -69,22 +70,24 @@ class TrainingLogger:
             Current iteration index (0-based).
         optic : RefractiveOptic
             Current state of the optic being optimized.
-        loss : float
-            Loss value for this iteration.
+        metrics : dict[str, float]
+            Scalar values to record, e.g. {"loss": 1.23, "lr": 0.05}.
+            All keys are plotted together on the metrics chart.
         """
-        self._loss_history.append(loss)
+        for key, value in metrics.items():
+            self._history.setdefault(key, []).append(value)
 
         if iteration % self._config.frequency != 0:
             return
 
         suffix = "" if self._config.overwrite else f"_{iteration:06d}"
-        self._save_concentration_slice(optic, suffix)
-        self._save_loss_curve(suffix)
+        self._save_refractive_index_slice(optic, suffix)
+        self._save_metrics_curve(suffix)
 
     def _filepath(self, name: str, suffix: str, ext: str) -> Path:
         return self._config.output_dir / f"{name}{suffix}.{ext}"
 
-    def _save_concentration_slice(self, optic: RefractiveOptic, suffix: str) -> None:
+    def _save_refractive_index_slice(self, optic: RefractiveOptic, suffix: str) -> None:
         import matplotlib
         import matplotlib.pyplot as plt
 
@@ -103,17 +106,18 @@ class TrainingLogger:
         fig.savefig(self._filepath("refractive_index", suffix, "png"))
         plt.close(fig)
 
-    def _save_loss_curve(self, suffix: str) -> None:
+    def _save_metrics_curve(self, suffix: str) -> None:
         import matplotlib
         import matplotlib.pyplot as plt
 
         matplotlib.use("agg")
 
-        fig, ax = plt.subplots()
-        ax.plot(self._loss_history)
-        ax.set_xlabel("Iteration")
-        ax.set_ylabel("Loss (µm)")
-        ax.set_yscale("log")
-        ax.grid(True, alpha=0.3)
-        fig.savefig(self._filepath("loss", suffix, "png"))
-        plt.close(fig)
+        for key, values in self._history.items():
+            fig, ax = plt.subplots()
+            ax.plot(values)
+            ax.set_xlabel("Iteration")
+            ax.set_ylabel(key)
+            ax.set_yscale("log")
+            ax.grid(True, alpha=0.3)
+            fig.savefig(self._filepath(key, suffix, "png"))
+            plt.close(fig)
